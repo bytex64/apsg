@@ -1,58 +1,57 @@
+/* This file should compile on your average Unix (tested on Linux and
+ * FreeBSD) and in Borland Turbo C 2.0. The implementation is wildly
+ * different for each - the Unix version prints values and delays for
+ * validation, and the DOS version does actual timing and writes to the
+ * SN76489. But this provides a good way to validate the logic without
+ * having to wrangle emulators and disk images. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #ifdef DOS
+  #include "p_dos.h"
 
-#include <conio.h>
-#include <dos.h>
-#include "timer.h"
-
-typedef unsigned char uint8_t;
-typedef unsigned int  uint16_t;
-typedef unsigned long uint32_t;
-
-interrupt_handler saved_timer_handler;
-uint16_t counter;
-
-void interrupt timer(unsigned bp, unsigned di, unsigned si, unsigned ds, unsigned es, unsigned dx, unsigned cx, unsigned bx, unsigned ax);
-
-void rdelay(uint16_t register d) {
-	d >>= 4;
-	while (counter < d) { }
-	counter = 0;
-}
-
-#else
-
-#include <stdint.h>
-
-void rdelay(uint16_t d) {
-	printf("delay %d\n", d);
-}
-
-void outportb(uint16_t port, uint8_t byte) {
-	printf("port write %02X: %02X\n", port, byte);
-}
-
+  /* Function pointer to the previous timer (int 56h) handler */
+  interrupt_handler saved_timer_handler;
+#else /* unix implementations */
+  #include "p_unix.h"
 #endif
 
-#define TIMER_DELAY 90
-
+/* This structure only contains the relevant I/O and delay commands. The
+ * rest is filtered out in parse(). */
 typedef struct vgm {
 	uint8_t *data;
 	uint16_t data_size;
 } vgm_t;
 
+/* Parse the file into a set of I/O and delay commands in a vgm struct.
+ * Due to not wanting to mess with segmentation limitations, this will
+ * load at most a little under 64K of data. If the song data is larger,
+ * it will be truncated. */
 vgm_t parse(FILE *f) {
 	vgm_t vgm;
-	uint32_t * p;
+	uint32_t *wp; /* word pointer into buf */
 	uint32_t v1;
-	uint16_t data_copied = 0;
+	long end_of_data;
+	uint16_t data_copied = 0, header_size = 0x40, version = 0;
 	int n;
-	uint8_t buf[0x100];
 	uint8_t *d;
+	uint8_t buf[0x100];
 	uint8_t finish = 0;
+
+	/* First, set end of data to actual file size. */
+	n = fseek(f, 0, SEEK_END);
+	if (n != 0) {
+		perror("Seeking to end");
+		exit(2);
+	}
+	end_of_data = ftell(f);
+	/* Seek back to the beginning. */
+	n = fseek(f, 0, SEEK_SET);
+	if (n != 0) {
+		perror("Seeking to beginning");
+		exit(2);
+	}
 
 	n = fread(buf, 0x40, 1, f);
 	if (n < 1) {
@@ -60,51 +59,72 @@ vgm_t parse(FILE *f) {
 		exit(2);
 	}
 
-	p = (uint32_t *)buf;
-	if (memcmp(p, "Vgm ", 4) != 0) {
+	if (memcmp(buf, "Vgm ", 4) != 0) {
 		printf("Not an uncompressed VGM file\n");
 		exit(2);
 	}
+	wp = (uint32_t *)buf;
 
-	p++;
-	v1 = *p - 0x3C; /* calculate data size from EoF offset */
+	v1 = wp[1] + 4; /* EoF offset */
+	if (v1 < end_of_data) {
+		/* This uh, might not be totally reliable. But we're
+		 * gonna trust it for now. */
+		end_of_data = v1;
+	} else if (v1 > end_of_data) {
+		printf("File reports end of data beyond end of file. Ignoring.\n");
+	}
+
+	version = (uint16_t)wp[2]; /* version */
+	printf("VGM version " U8_FS "." U8_FS "." U8_FS "\n",
+		(uint8_t)((version >> 8) & 0xF),
+		(uint8_t)((version >> 4) & 0xF),
+		(uint8_t)(version & 0xF)
+	);
+
+	v1 = wp[3];
+	if (v1 != 2000000ul) {
+		int mhz = (int)(v1 / 1000);
+		printf("This song's SN clock is %d.%02dMHz, not 2MHz. Pitch will be shifted.\n", mhz / 1000, mhz % 1000);
+	}
+
+	if (version > 0x151) {
+		v1 = wp[0x34 >> 2]; /* data offset */
+		if (v1 >= 0xc) {
+			/* we have to read a bit more because this file
+			   has a larger offset */
+			int remainder = (int)(v1 - 0xc);
+			if (remainder > 192) {
+				printf("Header says there are %d more bytes in the header, but there can be at\n", remainder);
+				printf("most 192\n");
+				exit(2);
+			}
+			n = fread(buf + 0x40, remainder, 1, f);
+			if (n < 1) {
+				perror("Failed to read extra header");
+				exit(2);
+			}
+			header_size += remainder;
+			printf("Read %d extra header bytes\n", remainder);
+		}
+	}
+
+	v1 = end_of_data - header_size; /* calculate data size */
 	if (v1 > 0xFFFF) {
 		/* Sizes larger than 64K get truncated for now */
 		vgm.data_size = 0xFFFF;
 	} else {
 		vgm.data_size = (uint16_t) v1;
 	}
-	printf("Allocating %u bytes\n", vgm.data_size);
+	printf("Allocating " U16_FS " bytes\n", vgm.data_size);
 	vgm.data = malloc(vgm.data_size);
 	if (vgm.data == NULL) {
 		printf("Could not allocate data space\n");
 		exit(2);
 	}
 
-	p++;
-	v1 = *p; /* version */
-	printf("VGM version %d.%d.%d\n", (char)((v1 >> 8) & 0xF), (char)((v1 >> 4) & 0xF), (char)(v1 & 0xF));
-
-	if (v1 > 0x151) {
-		p = (uint32_t *)(buf + 0x34);
-		if (*p >= 0xc) {
-			/* whoops, have to read a bit more because this file
-			   has a larger offset */
-			int m = (int)(*p - 0xc);
-			if (m > (0x100 - 0x40)) {
-				printf("Too much extra header\n");
-				exit(2);
-			}
-			n = fread(buf + 0x40, m, 1, f);
-			if (n < 1) {
-				perror("Failed to read extra header");
-				exit(2);
-			}
-			printf("Read %d extra header bytes\n", m);
-		}
-	}
-
 	d = vgm.data;
+	/* Check for at most 0xFFFC copied bytes so we still have room
+	 * to put a three-byte delay command. */
 	while (!finish && !feof(f) && data_copied < 0xFFFC) {
 		uint32_t s = 0;
 		int cmd = fgetc(f);
@@ -115,18 +135,18 @@ vgm_t parse(FILE *f) {
 			break;
 		case 0x50:
 			/* SN76489 write */
-			*d = (unsigned char) cmd;
+			*d = (uint8_t) cmd;
 			d++;
-			*d = (unsigned char) fgetc(f);
+			*d = (uint8_t) fgetc(f);
 			d++;
 			data_copied += 2;
 			break;
 		case 0x61:
-			*d = (unsigned char) cmd;
+			*d = (uint8_t) cmd;
 			d++;
-			*d = (unsigned char) fgetc(f);
+			*d = (uint8_t) fgetc(f);
 			d++;
-			*d = (unsigned char) fgetc(f);
+			*d = (uint8_t) fgetc(f);
 			d++;
 			data_copied += 3;
 			break;
@@ -153,7 +173,7 @@ vgm_t parse(FILE *f) {
 				perror("data block");
 				exit(2);
 			}
-			printf("data block of length %u @ %ld\n", s, ftell(f));
+			printf("data block of length " U32_FS " @ %ld\n", s, ftell(f));
 			while (s > 0) {
 				fgetc(f);
 				s--;
@@ -176,11 +196,12 @@ vgm_t parse(FILE *f) {
 }
 
 void play(vgm_t * vgm) {
-	unsigned char * d = vgm->data;
-	unsigned int delay;
+	uint8_t * d = vgm->data;
+	uint16_t delay;
+	uint8_t cmd;
 
 	while (d - vgm->data < vgm->data_size) {
-		unsigned char cmd = *d;
+		cmd = *d;
 		d++;
 		switch (cmd) {
 		case 0x50:
@@ -211,6 +232,7 @@ void play(vgm_t * vgm) {
 	}
 }
 
+/* Sets the attentuation for all channels to 0xF, turning them off. */
 void shutdown() {
 	outportb(0x50, 0x9f);
 	rdelay(10);
@@ -235,7 +257,9 @@ int main(int argc, char * argv[]) {
 	fclose(f);
 
 #ifdef DOS
-	/* HACK - wait a couple of seconds for the FDD to stop */
+	/* HACK - wait a couple of seconds for the FDD to stop.
+	 * Otherwise, stealing the timer interrupt will cause the drive
+	 * to keep spinning. */
 	sleep(2);
 	saved_timer_handler = install_timer_handler(timer);
 	load_timer(82);
@@ -246,6 +270,7 @@ int main(int argc, char * argv[]) {
 	shutdown();
 
 #ifdef DOS
+	/* Restore the original timer handler */
 	install_timer_handler(saved_timer_handler);
 #endif
 	return 0;

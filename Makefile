@@ -1,5 +1,5 @@
-apsg: apsg.c
-	cc $< -g -Wall -o $@
+apsg: apsg.c p_unix.c
+	cc -g -Wall $^ -o $@
 
-apsg.exe: apsg.c timer.c intr.asm
-	tcc -mc -G -O -Z -DDOS -w apsg.c timer.c intr.asm
+apsg.exe: apsg.c p_dos.c intr.asm
+	tcc -mc -G -O -Z -DDOS -w apsg.c p_dos.c intr.asm
