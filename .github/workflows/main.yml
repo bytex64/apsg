@@ -1,0 +1,38 @@
+name: build-apsg
+run-name: build APSG
+on: [push]
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: apsg
+      - name: update apt
+        run: sudo apt update
+      - name: install DOSBox
+        run: sudo apt install -y dosbox
+      - name: Check DOSBox version
+        run: dosbox --version
+      - name: Fetch Turbo C
+        run: wget https://yomiko.bytex64.net/outbox/tcc.tar.xz
+      - name: Extract Turbo C
+        run: tar xvf tcc.tar.xz && rm tcc.tar.xz
+      - name: Turbo C/ASM version
+        run: dosbox -conf apsg/check.conf
+        env:
+          SDL_VIDEODRIVER: dummy
+      - name: Compile APSG
+        run: dosbox -conf apsg/build.conf
+        env:
+          SDL_VIDEODRIVER: dummy
+      - name: Upload logs
+        uses: actions/upload-artifact@v3
+        with:
+          name: logs
+          path: '*.LOG'
+      - name: Upload binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: binary
+          path: apsg/APSG.EXE
