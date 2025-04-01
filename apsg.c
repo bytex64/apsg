@@ -20,8 +20,9 @@
 /* This structure only contains the relevant I/O and delay commands. The
  * rest is filtered out in parse(). */
 typedef struct vgm {
-	uint8_t *data;
+	uint32_t clock;
 	uint16_t data_size;
+	uint8_t *data;
 } vgm_t;
 
 /* Parse the file into a set of I/O and delay commands in a vgm struct.
@@ -33,7 +34,7 @@ vgm_t parse(FILE *f) {
 	uint32_t *wp; /* word pointer into buf */
 	uint32_t v1;
 	long end_of_data;
-	uint16_t data_copied = 0, header_size = 0x40, version = 0;
+	uint16_t data_copied = 0, header_size = 0x40, version = 0, tmp;
 	int n;
 	uint8_t *d;
 	uint8_t buf[0x100];
@@ -81,11 +82,7 @@ vgm_t parse(FILE *f) {
 		(uint8_t)(version & 0xF)
 	);
 
-	v1 = wp[3];
-	if (v1 != 2000000ul) {
-		int mhz = (int)(v1 / 1000);
-		printf("This song's SN clock is %d.%02dMHz, not 2MHz. Pitch will be shifted.\n", mhz / 1000, mhz % 1000);
-	}
+	vgm.clock = wp[3];
 
 	if (version > 0x151) {
 		v1 = wp[0x34 >> 2]; /* data offset */
@@ -144,10 +141,12 @@ vgm_t parse(FILE *f) {
 		case 0x61:
 			*d = (uint8_t) cmd;
 			d++;
-			*d = (uint8_t) fgetc(f);
-			d++;
-			*d = (uint8_t) fgetc(f);
-			d++;
+			tmp = (uint16_t) fgetc(f);
+			tmp |= ((uint16_t) fgetc(f)) << 8;
+			/* prescale the delay */
+			tmp >>= 4;
+			*((uint16_t *)d) = tmp;
+			d += 2;
 			data_copied += 3;
 			break;
 		case 0x62:
@@ -195,6 +194,50 @@ vgm_t parse(FILE *f) {
 	return vgm;
 }
 
+void retune(vgm_t * vgm, uint32_t numerator, uint32_t divisor) {
+	uint16_t i = 0;
+	uint32_t v;
+	while (i < vgm->data_size - 1) {
+		switch (vgm->data[i]) {
+		case 0x50:
+			if ((vgm->data[i + 1] & 0x90) == 0x80 && /* low bits update */
+			    (vgm->data[i + 1] & 0x60) != 0x60 && /* not noise channel */
+			    vgm->data[i + 2] == 0x50 &&
+			    (vgm->data[i + 3] & 0x80) == 0) { /* high bits update */
+				/* Extract 10-bit value */
+				v = ((vgm->data[i + 3] & 0x3F) << 4) | (vgm->data[i + 1] & 0x0F);
+				/* scale */
+#ifndef DOS
+				printf("rescaled %d to ", v);
+#endif
+				v *= numerator;
+				v /= divisor;
+#ifndef DOS
+				printf("%d\n", v);
+#endif
+				/* write it back */
+				vgm->data[i + 1] = (vgm->data[i + 1] & 0xF0) | (v & 0x0F);
+				vgm->data[i + 3] = (vgm->data[i + 3] & 0xC0) | ((v >> 4) & 0x3F);
+				i += 4;
+			} else {
+#ifndef DOS
+				printf("other tone command %02X\n", vgm->data[i + 1]);
+#endif
+				i += 2;
+			}
+			break;
+		/* skip timing commands */
+		case 0x61:
+			i += 3;
+			break;
+		case 0x62:
+		case 0x63:
+			i += 1;
+			break;
+		}
+	}
+}
+
 void play(vgm_t * vgm) {
 	uint8_t * d = vgm->data;
 	uint16_t delay;
@@ -214,10 +257,10 @@ void play(vgm_t * vgm) {
 			rdelay(delay);
 			break;
 		case 0x62:
-			rdelay(735);
+			rdelay(46);
 			break;
 		case 0x63:
-			rdelay(882);
+			rdelay(55);
 			break;
 		default:
 			printf("unknown command %02X\n", cmd);
@@ -246,15 +289,35 @@ void shutdown() {
 int main(int argc, char * argv[]) {
 	FILE * f;
 	vgm_t vgm;
+	int sw_retune = 1;
+	int c = 1;
 
 	if (argc < 2) {
-		printf("Usage: apsg file.vgm\n");
+		printf("Usage: apsg [/n] file.vgm\n");
+		printf("\n    /n    do not retune for clock differences\n");
 		exit(1);
 	}
 
-	f = fopen(argv[1], "rb");
+	if (strncmp(argv[c], "/n", 3) == 0) {
+		sw_retune = 0;
+		c++;
+	}
+
+	f = fopen(argv[c], "rb");
 	vgm = parse(f);
 	fclose(f);
+
+	if (vgm.clock != 2000000ul) {
+		int mhz = (int)(vgm.clock / 1000);
+		printf("This song's SN clock is %d.%02dMHz, not 2MHz. ", mhz / 1000, mhz % 1000);
+		if (sw_retune) {
+			printf("Adjusting tuning.\n");
+			retune(&vgm, 2000, vgm.clock / 1000);
+			printf("Done.\n");
+		} else {
+			printf("Pitch will not be accurate.\n");
+		}
+	}
 
 #ifdef DOS
 	/* HACK - wait a couple of seconds for the FDD to stop.

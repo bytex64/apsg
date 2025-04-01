@@ -19,8 +19,12 @@ interrupt_handler install_timer_handler(interrupt_handler next) {
 
 /* Wait until the counter reaches our target value. */
 void rdelay(uint16_t register d) {
-	d >>= 4;
 	while (counter < d) { }
+	/* It may seem weird to reset the counter _after_ we wait, but VGM kind
+	 * of expects that writes don't take any time, which is definitely not
+	 * the case. So our delay counts are from the last reset, not the
+	 * current time.
+	 */
 	counter = 0;
 }
 

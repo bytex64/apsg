@@ -25,9 +25,16 @@ Run it with a VGM file like so:
 
 apsg file.vgm
 
-It doesn't take any options. It does require that the VGM files are
-uncompressed. A lot of VGM files are actually gzip compressed, so you
-will have to decompress them first.
+It does require that the VGM files are uncompressed. A lot of VGM files
+are actually gzip compressed, so you will have to decompress them first
+with something like:
+
+zcat original.vgm > uncompressed.vgm
+
+If the SN76489 frequency is not 2MHz (and it probably won't be - pretty
+much every other system used a color clock signal), APSG will re-tune
+the notes based on the difference. If you don't want it to do that, you
+can use the /n switch before the filename.
 
 On Unix, it will just print out a list of I/O writes and delays. This is
 just for validating the logic without having to mess with emulators or
