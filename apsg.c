@@ -84,9 +84,9 @@ vgm_t parse(FILE *f) {
 
 	vgm.clock = wp[3];
 
-	if (version > 0x151) {
+	if (version >= 0x150) {
 		v1 = wp[0x34 >> 2]; /* data offset */
-		if (v1 >= 0xc) {
+		if (v1 > 0xc) {
 			/* we have to read a bit more because this file
 			   has a larger offset */
 			int remainder = (int)(v1 - 0xc);
@@ -177,6 +177,24 @@ vgm_t parse(FILE *f) {
 				fgetc(f);
 				s--;
 			}
+			break;
+		case 0x70:
+		case 0x71:
+		case 0x72:
+		case 0x73:
+		case 0x74:
+		case 0x75:
+		case 0x76:
+		case 0x77:
+		case 0x78:
+		case 0x79:
+		case 0x7a:
+		case 0x7b:
+		case 0x7c:
+		case 0x7d:
+		case 0x7e:
+		case 0x7f:
+			/* short 1-16 sample delays; just ignore them */
 			break;
 		case -1:
 			perror("read data");
